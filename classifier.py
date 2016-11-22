@@ -25,7 +25,7 @@ LEARNING_RATE_DECAY_FACTOR = 0.1  # Learning rate decay factor.
 INITIAL_LEARNING_RATE = 0.05       # Initial learning rate.
 
 FLAGS = tf.app.flags.FLAGS
-tf.app.flags.DEFINE_integer('max_steps', 1000000,
+tf.app.flags.DEFINE_integer('max_steps', int(1e4),
                             """Number of batches to run.""")
 tf.app.flags.DEFINE_integer('batch_size', 128,
                             """Number of images to process in a batch.""")
@@ -138,58 +138,7 @@ def _variable_with_weight_decay(name, shape, stddev, wd):
         tf.add_to_collection('losses', weight_decay)
     return var
 
-
-def put_kernels_on_grid (kernel, grid_Y, grid_X, pad = 1):
-
-    '''Visualize conv. features as an image (mostly for the 1st layer).
-    Place kernel into a grid, with some paddings between adjacent filters.
-
-    Args:
-      kernel:            tensor of shape [Y, X, NumChannels, NumKernels]
-      (grid_Y, grid_X):  shape of the grid. Require: NumKernels == grid_Y * grid_X
-                           User is responsible of how to break into two multiples.
-      pad:               number of black pixels around each filter (between them)
-
-    Return:
-      Tensor of shape [(Y+2*pad)*grid_Y, (X+2*pad)*grid_X, NumChannels, 1].
-    '''
-
-    x_min = tf.reduce_min(kernel)
-    x_max = tf.reduce_max(kernel)
-
-    kernel1 = (kernel - x_min) / (x_max - x_min)
-
-    # pad X and Y
-    x1 = tf.pad(kernel1, tf.constant( [[pad,pad],[pad, pad],[0,0],[0,0]] ), mode = 'CONSTANT')
-
-    # X and Y dimensions, w.r.t. padding
-    Y = kernel1.get_shape()[0] + 2 * pad
-    X = kernel1.get_shape()[1] + 2 * pad
-
-    channels = kernel1.get_shape()[2]
-
-    # put NumKernels to the 1st dimension
-    x2 = tf.transpose(x1, (3, 0, 1, 2))
-    # organize grid on Y axis
-    x3 = tf.reshape(x2, tf.pack([grid_X, Y * grid_Y, X, channels])) #3
-
-    # switch X and Y axes
-    x4 = tf.transpose(x3, (0, 2, 1, 3))
-    # organize grid on X axis
-    x5 = tf.reshape(x4, tf.pack([1, X * grid_X, Y * grid_Y, channels])) #3
-
-    # back to normal order (not combining with the next step for clarity)
-    x6 = tf.transpose(x5, (2, 1, 3, 0))
-
-    # to tf.image_summary order [batch_size, height, width, channels],
-    #   where in this case batch_size == 1
-    x7 = tf.transpose(x6, (3, 0, 1, 2))
-
-    # scale to [0, 255] and convert to uint8
-    return tf.image.convert_image_dtype(x7, dtype = tf.uint8)
-
-
-def inference(images):
+def inference(images, keep_prob):
     """Build the CIFAR-10 model.
     Args:
       images: Images returned from distorted_inputs() or inputs().
@@ -214,24 +163,16 @@ def inference(images):
         bias = tf.nn.bias_add(conv, biases)
         conv1 = tf.nn.relu(bias, name=scope.name)
         _activation_summary(conv1)
-
-        grid_x = grid_y = 8
-        grid = put_kernels_on_grid (kernel, (grid_y, grid_x))
-        tf.image_summary(scope.name + '/features', grid, max_images=1)
-
-
     print("conv1", conv1.get_shape())
 
     # pool1
     pool1 = tf.nn.max_pool(conv1, ksize=[1, 3, 3, 1], strides=[1, 2, 2, 1],
                            padding='SAME', name='pool1')
-
     print("pool1", pool1.get_shape())
 
     # norm1
     norm1 = tf.nn.lrn(pool1, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
                       name='norm1')
-
     print("norm1", norm1.get_shape())
 
     # conv2
@@ -245,23 +186,16 @@ def inference(images):
         bias = tf.nn.bias_add(conv, biases)
         conv2 = tf.nn.relu(bias, name=scope.name)
         _activation_summary(conv2)
-
-        grid_x = grid_y = 8
-        grid = put_kernels_on_grid (kernel, (grid_y, grid_x))
-        tf.image_summary(scope.name + '/features', grid, max_images=1)
-
     print("conv2", conv2.get_shape())
 
     # norm2
     norm2 = tf.nn.lrn(conv2, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
                       name='norm2')
-
     print("norm2", norm2.get_shape())
 
     # pool2
     pool2 = tf.nn.max_pool(norm2, ksize=[1, 3, 3, 1],
                            strides=[1, 2, 2, 1], padding='SAME', name='pool2')
-
     print("pool2", pool2.get_shape())
 
     # local3
@@ -269,16 +203,12 @@ def inference(images):
         # Move everything into depth so we can perform a single matrix multiply.
         dim = np.prod(pool2.get_shape().as_list()[1:])
         reshape = tf.reshape(pool2, [-1, dim])
-        print("reshape", reshape.get_shape())
         weights = _variable_with_weight_decay('weights', shape=[dim, 384],
                                               stddev=0.04, wd=0.004)
         biases = _variable_on_cpu('biases', [384], tf.constant_initializer(0.1))
         local3 = tf.nn.relu(tf.matmul(reshape, weights) + biases, name=scope.name)
         _activation_summary(local3)
-
-        grid_x = grid_y = 8
-        grid = put_kernels_on_grid (weights, (grid_y, grid_x))
-        tf.image_summary(scope.name + '/features', grid, max_images=1)
+    print("local3", local3.get_shape())
 
     # local4
     with tf.variable_scope('local4') as scope:
@@ -287,14 +217,10 @@ def inference(images):
         biases = _variable_on_cpu('biases', [192], tf.constant_initializer(0.1))
         local4 = tf.nn.relu(tf.matmul(local3, weights) + biases, name=scope.name)
         _activation_summary(local4)
+    print("local4", local4.get_shape())
 
-        grid_x = grid_y = 8
-        grid = put_kernels_on_grid (weights, (grid_y, grid_x))
-        tf.image_summary(scope.name + '/features', grid, max_images=1)
-
-
-    keep_prob = tf.placeholder(tf.float32)
     local4_drop = tf.nn.dropout(local4, keep_prob)
+    print("local4_drop", local4_drop.get_shape())
 
     # softmax, i.e. softmax(WX + b)
     with tf.variable_scope('softmax_linear') as scope:
@@ -304,14 +230,11 @@ def inference(images):
                                   tf.constant_initializer(0.0))
         softmax_linear = tf.add(tf.matmul(local4_drop, weights), biases, name=scope.name)
         _activation_summary(softmax_linear)
+    print("softmax_linear", softmax_linear.get_shape())
 
-        grid_x = grid_y = 8
-        grid = put_kernels_on_grid (weights, (grid_y, grid_x))
-        tf.image_summary(scope.name + '/features', grid, max_images=1)
-
-    softmax_normalized = tf.nn.softmax(softmax_linear)        
+    softmax_normalized = tf.nn.softmax(softmax_linear)
+    print("softmax_normalized", softmax_normalized.get_shape())
     return softmax_normalized
-
 
 def train_func(total_loss, global_step):
     """Train CIFAR-10 model.
@@ -402,7 +325,8 @@ def main(argv=None):  # pylint: disable=unused-argument
         # Get images and labels
         images = tf.placeholder(tf.float32, shape=[None, img_width, img_height, img_channels])
         labels = tf.placeholder(tf.float32, shape=[None])
-
+        keep_prob = tf.placeholder(tf.float32)
+        
         # Manipulate the images in the batch randomly to artificially create
         # more data and make the network able to generalize better
         images = tf.map_fn(lambda img: tf.image.random_flip_left_right(img), images) 
@@ -411,7 +335,7 @@ def main(argv=None):  # pylint: disable=unused-argument
         images = tf.map_fn(lambda img: tf.image.per_image_whitening(img), images)
 
         # Calculate the logits and loss
-        logits = inference(images)
+        logits = inference(images, keep_prob)
         loss = loss_func(logits, labels)
 
         # Create a training operation that updates the
@@ -464,6 +388,21 @@ def main(argv=None):  # pylint: disable=unused-argument
             if step % 1000 == 0 or (step + 1) == FLAGS.max_steps:
                 checkpoint_path = os.path.join(FLAGS.checkpoint_dir, 'model.ckpt')
                 saver.save(sess, checkpoint_path, global_step=step)
+                with tf.variable_scope('conv1', reuse=True) as scope:
+                    W_conv1 = tf.get_variable('weights', shape=[5, 5, 3, 64])
+                    weights = W_conv1.eval(session=sess)
+                    weights_path = os.path.join(FLAGS.checkpoint_dir,
+                                                scope.name + '_weights_' + str(step) + '.npz')
+                    with open(weights_path, "wb") as outfile:
+                        np.save(outfile, weights)
+
+                with tf.variable_scope('conv2', reuse=True) as scope:
+                    W_conv2 = tf.get_variable('weights', shape=[5, 5, 64, 64])
+                    weights = W_conv2.eval(session=sess)
+                    weights_path = os.path.join(FLAGS.checkpoint_dir,
+                                                scope.name + '_weights_' + str(step) + '.npz')
+                    with open(weights_path, "wb") as outfile:
+                        np.save(outfile, weights)
 
 if __name__ == '__main__':
     tf.app.run()
