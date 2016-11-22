@@ -6,3 +6,6 @@ __pycache__
 models
 *.swp
 *.p
+checkpoint_dir
+eval_dir
+train_dir
