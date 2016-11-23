@@ -2,9 +2,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from tensorflow.python.framework import dtypes
+from tensorflow.python.ops import math_ops
 from datetime import datetime
 
 import pickle
+import random
 
 import tensorflow as tf
 import numpy as np
@@ -14,7 +17,6 @@ import time
 import os
 
 NUM_CLASSES = 43
-IMAGE_SIZE = 32
 NUM_EXAMPLES_PER_EPOCH_FOR_TRAIN = 50000
 NUM_EXAMPLES_PER_EPOCH_FOR_EVAL = 10000
 
@@ -25,7 +27,7 @@ LEARNING_RATE_DECAY_FACTOR = 0.1  # Learning rate decay factor.
 INITIAL_LEARNING_RATE = 0.05       # Initial learning rate.
 
 FLAGS = tf.app.flags.FLAGS
-tf.app.flags.DEFINE_integer('max_steps', int(1e4),
+tf.app.flags.DEFINE_integer('max_steps', int(1e6),
                             """Number of batches to run.""")
 tf.app.flags.DEFINE_integer('batch_size', 128,
                             """Number of images to process in a batch.""")
@@ -155,7 +157,7 @@ def inference(images, keep_prob):
     print("images", images.get_shape())
     with tf.variable_scope('conv1') as scope:
         kernel = _variable_with_weight_decay('weights',
-                                             shape=[5, 5, 3, 64],
+                                             shape=[5, 5, 1, 64],
                                              stddev=5e-2,
                                              wd=0.0)
         conv = tf.nn.conv2d(images, kernel, [1, 1, 1, 1], padding='SAME')
@@ -289,6 +291,25 @@ def train_func(total_loss, global_step):
 
     return train_op
 
+def augment_image(img):
+    img = tf.image.central_crop(img, np.random.uniform(0.6, 1.0))
+    #img = tf.image.random_hue(img, 0.25)
+    img = tf.image.random_saturation(img, lower=0, upper=10)
+    img = tf.image.random_brightness(img, max_delta=0.8)
+    img = tf.image.random_contrast(img, lower=0, upper=10)
+    img = tf.image.per_image_whitening(img)
+    return img
+    
+def augment_images(images):
+    _, img_height, img_width, _ = images.get_shape().as_list()
+    images = tf.map_fn(lambda img: augment_image(img), images)
+    images = tf.image.rgb_to_grayscale(images)
+    images = tf.image.resize_images(images, (img_height, img_width),
+                                    method=0,
+                                    align_corners=False)
+    # images_sample = sess.run(process_op, feed_dict={images_p:X_train[10:15]})
+    tf.image_summary(images.name, images, max_images=10)
+    return images
 
 def main(argv=None):  # pylint: disable=unused-argument
 
@@ -301,42 +322,22 @@ def main(argv=None):  # pylint: disable=unused-argument
         test = pickle.load(f)
 
     X_train, y_train = train['features'], train['labels']
-    X_test, y_test = test['features'], test['labels']
-
-    n_train = X_train.shape[0]
-    n_test = X_test.shape[0]
-
-    image_shape = X_train[0].shape
-    n_classes = len(np.unique(y_train))
-
-    img_width = image_shape[0]
-    img_height = image_shape[1]
-    img_channels = image_shape[2]
-
-    print("Number of training examples =", n_train)
-    print("Number of testing examples =", n_test)
-    print("Image data shape =", image_shape)
-    print("Number of classes =", n_classes)
-
 
     with tf.Graph().as_default():
         global_step = tf.Variable(0, trainable=False)
 
         # Get images and labels
-        images = tf.placeholder(tf.float32, shape=[None, img_width, img_height, img_channels])
-        labels = tf.placeholder(tf.float32, shape=[None])
-        keep_prob = tf.placeholder(tf.float32)
-        
+        images_p = tf.placeholder(tf.float32, shape=[None, 32, 32, 3])
+        labels_p = tf.placeholder(tf.float32, shape=[None])
+        keep_prob_p = tf.placeholder(tf.float32)
+
         # Manipulate the images in the batch randomly to artificially create
         # more data and make the network able to generalize better
-        images = tf.map_fn(lambda img: tf.image.random_flip_left_right(img), images) 
-        images = tf.map_fn(lambda img: tf.image.random_brightness(img, max_delta=63), images)
-        images = tf.map_fn(lambda img: tf.image.random_contrast(img, lower=0.2, upper=1.8), images)
-        images = tf.map_fn(lambda img: tf.image.per_image_whitening(img), images)
+        process_op = augment_images(images_p)
 
         # Calculate the logits and loss
-        logits = inference(images, keep_prob)
-        loss = loss_func(logits, labels)
+        logits = inference(process_op, keep_prob_p)
+        loss = loss_func(logits, labels_p)
 
         # Create a training operation that updates the
         # network parameters
@@ -362,12 +363,13 @@ def main(argv=None):  # pylint: disable=unused-argument
         for step in xrange(FLAGS.max_steps):
             start_time = time.time()
             idx = np.random.randint(len(X_train), size=FLAGS.batch_size)
-
-            sess.run(train_op, feed_dict={images:X_train[idx], labels:y_train[idx], keep_prob:0.4})
-            loss_value = sess.run(loss, feed_dict={images:X_train[idx], labels:y_train[idx], keep_prob:1.0})
-
+            sess.run(train_op, feed_dict={images_p:X_train[idx],
+                                          labels_p:y_train[idx],
+                                          keep_prob_p:0.4})
+            loss_value = sess.run(loss, feed_dict={images_p:X_train[idx],
+                                                   labels_p:y_train[idx],
+                                                   keep_prob_p:1.0})
             duration = time.time() - start_time
-
             assert not np.isnan(loss_value), 'Model diverged with loss = NaN'
 
             if step % 10 == 0:
@@ -381,7 +383,10 @@ def main(argv=None):  # pylint: disable=unused-argument
                                    examples_per_sec, sec_per_batch))
 
             if step % 100 == 0:
-                summary_str = sess.run(summary_op, feed_dict={images:X_train[idx], labels:y_train[idx], keep_prob:1.0})
+                summary_str = sess.run(summary_op, feed_dict={images_p:X_train[idx],
+                                                              labels_p:y_train[idx],
+                                                              keep_prob_p:1.0,
+                                                              global_step:step})
                 summary_writer.add_summary(summary_str, step)
 
             # Save the model checkpoint periodically.
@@ -389,7 +394,7 @@ def main(argv=None):  # pylint: disable=unused-argument
                 checkpoint_path = os.path.join(FLAGS.checkpoint_dir, 'model.ckpt')
                 saver.save(sess, checkpoint_path, global_step=step)
                 with tf.variable_scope('conv1', reuse=True) as scope:
-                    W_conv1 = tf.get_variable('weights', shape=[5, 5, 3, 64])
+                    W_conv1 = tf.get_variable('weights', shape=[5, 5, 1, 64])
                     weights = W_conv1.eval(session=sess)
                     weights_path = os.path.join(FLAGS.checkpoint_dir,
                                                 scope.name + '_weights_' + str(step) + '.npz')

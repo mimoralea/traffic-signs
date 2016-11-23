@@ -17,7 +17,7 @@ import classifier
 FLAGS = tf.app.flags.FLAGS
 
 def eval_once(saver, summary_writer, top_k_op,
-              summary_op, X_test, y_test, images, labels):
+              summary_op, X_test, y_test, images_p, labels_p, keep_prob):
     """Run Eval once.
     Args:
       saver: Saver.
@@ -35,18 +35,18 @@ def eval_once(saver, summary_writer, top_k_op,
             print('No checkpoint file found')
             return
 
-        predictions = sess.run(top_k_op, feed_dict={images:X_test, labels:y_test, keep_prob:1.0})
+        predictions = sess.run(top_k_op, feed_dict={images_p:X_test, labels_p:y_test, keep_prob:1.0})
         print(predictions)
         true_count = np.sum(predictions)
         precision = true_count / len(X_test)
         summary = tf.Summary()
-        summary.ParseFromString(sess.run(summary_op, feed_dict={images:X_test, labels:y_test, keep_prob:1.0}))
+        summary.ParseFromString(sess.run(summary_op, feed_dict={images_p:X_test, labels_p:y_test, keep_prob:1.0}))
         summary.value.add(tag='Test Precision', simple_value=precision)
         summary_writer.add_summary(summary, global_step)
 
     return precision
 
-def eval_img(saver, logits, img, label, images, labels):
+def eval_img(saver, logits, img, label, images_p, labels_p, keep_prob):
     """Run Eval once.
     Args:
       saver: Saver.
@@ -64,7 +64,7 @@ def eval_img(saver, logits, img, label, images, labels):
             print('No checkpoint file found')
             return
         sign_strings = pd.read_csv('signnames.csv', index_col=0)
-        probs = sess.run(logits, feed_dict={images:[img], labels:[label], keep_prob:1.0})[0]
+        probs = sess.run(logits, feed_dict={images_p:[img], labels_p:[label], keep_prob:1.0})[0]
         sign_strings['prob'] = pd.Series(probs, index=sign_strings.index)
         sign_strings['correct'] = pd.Series(sign_strings.index.values == label, index=sign_strings.index)
         return sign_strings.sort_values(['prob', 'SignName'], ascending=[0, 1])
@@ -81,12 +81,17 @@ def evaluate(X_test, y_test):
         img_channels = image_shape[2]
 
         # Get images and labels for CIFAR-10.
-        images = tf.placeholder(tf.float32, shape=[None, img_width, img_height, img_channels])
-        labels = tf.placeholder(tf.int32, shape=[None])
+        images_p = tf.placeholder(tf.float32, shape=[None, img_width, img_height, img_channels])
+        images = images_p
+        images = tf.map_fn(lambda img: tf.squeeze(tf.image.rgb_to_grayscale(img)), images)
+        images = tf.expand_dims(images, -1)
+        labels_p = tf.placeholder(tf.int32, shape=[None])
+        labels = labels_p
+        keep_prob = tf.placeholder(tf.float32)
 
         # Build a Graph that computes the logits predictions from the
         # inference model.
-        logits = classifier.inference(images)
+        logits = classifier.inference(images, keep_prob)
 
         # Calculate predictions.
         top_k_op = tf.nn.in_top_k(logits, labels, 5)
@@ -111,7 +116,7 @@ def evaluate(X_test, y_test):
         label = y_test[idx]
         predictions = eval_img(saver, logits,
                                img, label,
-                               images, labels)
+                               images_p, labels_p, keep_prob)
         print(predictions)
         plt.style.use('ggplot')
 
