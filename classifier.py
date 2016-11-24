@@ -328,7 +328,7 @@ def main(argv=None):  # pylint: disable=unused-argument
 
         # Get images and labels
         images_p = tf.placeholder(tf.float32, shape=[None, 32, 32, 3])
-        labels_p = tf.placeholder(tf.float32, shape=[None])
+        labels_p = tf.placeholder(tf.int32, shape=[None])
         keep_prob_p = tf.placeholder(tf.float32)
 
         # Manipulate the images in the batch randomly to artificially create

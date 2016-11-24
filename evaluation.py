@@ -70,7 +70,7 @@ def eval_img(saver, logits, img, label, images_p, labels_p, keep_prob):
         return sign_strings.sort_values(['prob', 'SignName'], ascending=[0, 1])
 
 def evaluate(X_test, y_test):
-
+    
     """Eval CIFAR-10 for a number of steps."""
     with tf.Graph().as_default() as g:
 
