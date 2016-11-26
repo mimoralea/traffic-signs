@@ -5,12 +5,18 @@ from __future__ import print_function
 from tensorflow.python.framework import dtypes
 from tensorflow.python.ops import math_ops
 from datetime import datetime
+from sklearn.metrics import classification_report
+from sklearn.metrics import cohen_kappa_score
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import jaccard_similarity_score
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 import pickle
 import random
 
 import tensorflow as tf
 import numpy as np
+import pandas as pd
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
 import time
@@ -231,6 +237,7 @@ def inference(images, keep_prob):
         biases = _variable_on_cpu('biases', [NUM_CLASSES],
                                   tf.constant_initializer(0.0))
         softmax_linear = tf.add(tf.matmul(local4_drop, weights), biases, name=scope.name)
+        #softmax_linear = tf.add(tf.matmul(local4, weights), biases, name=scope.name)
         _activation_summary(softmax_linear)
     print("softmax_linear", softmax_linear.get_shape())
 
@@ -239,7 +246,7 @@ def inference(images, keep_prob):
     return softmax_normalized
 
 def train_func(total_loss, global_step):
-    """Train CIFAR-10 model.
+    """Train
     Create an optimizer and apply to all trainable variables. Add moving
     average for all trainable variables.
     Args:
@@ -292,29 +299,76 @@ def train_func(total_loss, global_step):
     return train_op
 
 def augment_image(img):
-    img = tf.image.central_crop(img, np.random.uniform(0.6, 1.0))
-    #img = tf.image.random_hue(img, 0.25)
+    img = tf.random_crop(img, [24, 24, 3])
+    img = tf.image.random_hue(img, 0.25)
     img = tf.image.random_saturation(img, lower=0, upper=10)
     img = tf.image.random_brightness(img, max_delta=0.8)
     img = tf.image.random_contrast(img, lower=0, upper=10)
     img = tf.image.per_image_whitening(img)
     return img
-    
-def augment_images(images):
-    _, img_height, img_width, _ = images.get_shape().as_list()
-    images = tf.map_fn(lambda img: augment_image(img), images)
-    images = tf.image.rgb_to_grayscale(images)
-    images = tf.image.resize_images(images, (img_height, img_width),
-                                    method=0,
-                                    align_corners=False)
-    # images_sample = sess.run(process_op, feed_dict={images_p:X_train[10:15]})
-    tf.image_summary(images.name, images, max_images=10)
+
+def augment_images(images, keep_prob_p):
+    with tf.device('/cpu:0'):
+        _, img_height, img_width, _ = images.get_shape().as_list()
+        images = tf.cond(tf.equal(keep_prob_p, 1.0),
+                         lambda: images,
+                         lambda: tf.map_fn(
+                             lambda img: augment_image(img), images))
+        images = tf.image.rgb_to_grayscale(images)
+        images = tf.image.resize_images(images, (img_height, img_width),
+                                        method=0,
+                                        align_corners=False)
+        tf.image_summary(images.name, images, max_images=10)
     return images
+
+
+def calculate_statistics(sess, images_p, labels_p, keep_prob_p,
+                         tag_prefix, logits, data, y_true, sign_strings,
+                         summary_writer, step):
+
+    pred_prob = sess.run(logits, feed_dict={images_p:data,
+                                            labels_p:y_true,
+                                            keep_prob_p:1.0})
+    y_pred = np.argmax(pred_prob, axis=1)
+
+    ck_score = cohen_kappa_score(y_true, y_pred, labels=range(NUM_CLASSES))
+    c_report = classification_report(y_true, y_pred,
+                                     labels=range(NUM_CLASSES),
+                                     target_names=sign_strings['SignName'],
+                                     sample_weight=None, digits=2)
+
+    accuracy = jaccard_similarity_score(y_true, y_pred)
+    precision = precision_score(y_true, y_pred, labels=range(NUM_CLASSES), average='weighted')
+    recall = recall_score(y_true, y_pred, labels=range(NUM_CLASSES), average='weighted')
+    f1 = f1_score(y_true, y_pred, labels=range(NUM_CLASSES), average='weighted')
+    c_matrix = confusion_matrix(y_true, y_pred,
+                                labels=range(NUM_CLASSES))
+
+    accuracy_summary = tf.Summary(value=[tf.Summary.Value(tag=tag_prefix + '_accuracy',
+                                                          simple_value=accuracy)])
+    precision_summary = tf.Summary(value=[tf.Summary.Value(tag=tag_prefix + '_precision',
+                                                           simple_value=precision)])
+    recall_summary = tf.Summary(value=[tf.Summary.Value(tag=tag_prefix + '_recall',
+                                                        simple_value=recall)])
+    f1_summary = tf.Summary(value=[tf.Summary.Value(tag=tag_prefix + '_f1',
+                                                    simple_value=f1)])
+    ck_summary = tf.Summary(value=[tf.Summary.Value(tag=tag_prefix + '_cohen_kappa',
+                                                    simple_value=ck_score)])
+
+    summary_writer.add_summary(accuracy_summary, step)
+    summary_writer.add_summary(precision_summary, step)
+    summary_writer.add_summary(recall_summary, step)
+    summary_writer.add_summary(f1_summary, step)
+    summary_writer.add_summary(ck_summary, step)
+
+    return accuracy, precision, recall, f1, ck_score, c_report, c_matrix
 
 def main(argv=None):  # pylint: disable=unused-argument
 
     training_file = 'data/train.p'
     testing_file = 'data/test.p'
+
+    sign_strings = pd.read_csv('signnames.csv', index_col=0)
 
     with open(training_file, mode='rb') as f:
         train = pickle.load(f)
@@ -322,6 +376,15 @@ def main(argv=None):  # pylint: disable=unused-argument
         test = pickle.load(f)
 
     X_train, y_train = train['features'], train['labels']
+    X_test, y_test = test['features'], test['labels']
+
+    idxs = np.array([], dtype=np.int32)
+    for i in range(NUM_CLASSES):
+        idxs = np.append(idxs, np.random.choice(
+            np.where(y_train == i)[0], size=20, replace=False))
+    X_validation, y_validation = X_train[idxs], y_train[idxs]
+    X_train = np.delete(X_train, idxs, 0)
+    y_train = np.delete(y_train, idxs, 0)
 
     with tf.Graph().as_default():
         global_step = tf.Variable(0, trainable=False)
@@ -333,7 +396,7 @@ def main(argv=None):  # pylint: disable=unused-argument
 
         # Manipulate the images in the batch randomly to artificially create
         # more data and make the network able to generalize better
-        process_op = augment_images(images_p)
+        process_op = augment_images(images_p, keep_prob_p)
 
         # Calculate the logits and loss
         logits = inference(process_op, keep_prob_p)
@@ -362,37 +425,79 @@ def main(argv=None):  # pylint: disable=unused-argument
 
         for step in xrange(FLAGS.max_steps):
             start_time = time.time()
-            idx = np.random.randint(len(X_train), size=FLAGS.batch_size)
+
+            batch_idxs = np.array([], dtype=np.int32)
+            for i in range(NUM_CLASSES):
+                batch_idxs = np.append(batch_idxs,
+                                       np.random.choice(
+                                           np.where(y_train == i)[0],
+                                           size=100, replace=False))
+            idx = np.random.choice(batch_idxs, size=FLAGS.batch_size, replace=False)
+
             sess.run(train_op, feed_dict={images_p:X_train[idx],
                                           labels_p:y_train[idx],
                                           keep_prob_p:0.4})
-            loss_value = sess.run(loss, feed_dict={images_p:X_train[idx],
-                                                   labels_p:y_train[idx],
-                                                   keep_prob_p:1.0})
             duration = time.time() - start_time
-            assert not np.isnan(loss_value), 'Model diverged with loss = NaN'
 
             if step % 10 == 0:
                 num_examples_per_step = FLAGS.batch_size
                 examples_per_sec = num_examples_per_step / duration
                 sec_per_batch = float(duration)
 
-                format_str = ('%s: step %d, loss = %.2f (%.1f examples/sec; %.3f '
-                              'sec/batch)')
-                print (format_str % (datetime.now(), step, loss_value,
-                                   examples_per_sec, sec_per_batch))
+                format_str = ('%s: step %d (%.1f examples/sec; %.3f sec/batch)')
+                print (format_str % (datetime.now(), step, examples_per_sec, sec_per_batch))
 
             if step % 100 == 0:
+                loss_value = sess.run(loss, feed_dict={images_p:X_train[idx],
+                                                       labels_p:y_train[idx],
+                                                       keep_prob_p:1.0})
+                assert not np.isnan(loss_value), 'Model diverged with loss = NaN'
                 summary_str = sess.run(summary_op, feed_dict={images_p:X_train[idx],
                                                               labels_p:y_train[idx],
                                                               keep_prob_p:1.0,
                                                               global_step:step})
                 summary_writer.add_summary(summary_str, step)
 
+                accuracy, precision, recall, f1, \
+                    ck_score, c_report, c_matrix = calculate_statistics(sess, images_p, labels_p,
+                                                                        keep_prob_p, 'batch', logits,
+                                                                        X_train[idx], y_train[idx],
+                                                                        sign_strings, summary_writer,
+                                                                        step)
+                format_str = ('batch train set | loss = %.2f, cohen kappa = %.2f, accuracy = %.2f, '
+                              'precision = %.2f, recall = %.2f, f1 = %.2f')
+                print (format_str % (loss_value, ck_score, accuracy,
+                                     precision, recall, f1))
+
             # Save the model checkpoint periodically.
             if step % 1000 == 0 or (step + 1) == FLAGS.max_steps:
                 checkpoint_path = os.path.join(FLAGS.checkpoint_dir, 'model.ckpt')
                 saver.save(sess, checkpoint_path, global_step=step)
+
+                train_idx = np.random.choice(len(X_train), 10000)
+                accuracy, precision, recall, f1, \
+                    ck_score, c_report, c_matrix = calculate_statistics(sess, images_p, labels_p,
+                                                                        keep_prob_p, 'train', logits,
+                                                                        X_train[train_idx], y_train[train_idx],
+                                                                        sign_strings, summary_writer,
+                                                                        step)
+                format_str = ('train data set | cohen kappa = %.2f, accuracy = %.2f, '
+                              'precision = %.2f, recall = %.2f, f1 = %.2f')
+                print (format_str % (ck_score, accuracy,
+                                     precision, recall, f1))
+
+                accuracy, precision, recall, f1, \
+                    ck_score, c_report, c_matrix = calculate_statistics(sess, images_p, labels_p,
+                                                                        keep_prob_p, 'validation', logits,
+                                                                        X_validation, y_validation,
+                                                                        sign_strings, summary_writer,
+                                                                        step)
+                format_str = ('validation data set | cohen kappa = %.2f, accuracy = %.2f, '
+                              'precision = %.2f, recall = %.2f, f1 = %.2f')
+                print (format_str % (ck_score, accuracy,
+                                     precision, recall, f1))
+
+            if step % 10000 == 0:
                 with tf.variable_scope('conv1', reuse=True) as scope:
                     W_conv1 = tf.get_variable('weights', shape=[5, 5, 1, 64])
                     weights = W_conv1.eval(session=sess)
@@ -408,6 +513,24 @@ def main(argv=None):  # pylint: disable=unused-argument
                                                 scope.name + '_weights_' + str(step) + '.npz')
                     with open(weights_path, "wb") as outfile:
                         np.save(outfile, weights)
+
+                accuracy, precision, recall, f1, \
+                    ck_score, c_report, c_matrix = calculate_statistics(sess, images_p, labels_p,
+                                                                        keep_prob_p, 'test', logits,
+                                                                        X_test, y_test,
+                                                                        sign_strings, summary_writer,
+                                                                        step)
+                format_str = ('test data set | cohen kappa = %.2f, accuracy = %.2f, '
+                              'precision = %.2f, recall = %.2f, f1 = %.2f')
+                print (format_str % (ck_score, accuracy,
+                                     precision, recall, f1))
+                print(c_report)
+
+                conf_matrix_path = os.path.join(FLAGS.checkpoint_dir,
+                                                scope.name + '_cmatrix_' + str(step) + '.npz')
+                with open(conf_matrix_path, "wb") as outfile:
+                    np.save(outfile, c_matrix)
+
 
 if __name__ == '__main__':
     tf.app.run()
