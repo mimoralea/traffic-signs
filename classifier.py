@@ -299,8 +299,8 @@ def train_func(total_loss, global_step):
     return train_op
 
 def augment_image(img):
-    img = tf.random_crop(img, [24, 24, 3])
-    img = tf.image.random_hue(img, 0.25)
+    # img = tf.random_crop(img, [24, 24, 3])
+    # img = tf.image.random_hue(img, 0.25)
     img = tf.image.random_saturation(img, lower=0, upper=10)
     img = tf.image.random_brightness(img, max_delta=0.8)
     img = tf.image.random_contrast(img, lower=0, upper=10)
