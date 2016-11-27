@@ -435,8 +435,7 @@ def main(argv=None):  # pylint: disable=unused-argument
                 print(c_report)
 
                 conf_matrix_path = os.path.join(
-                    FLAGS.checkpoint_dir,
-                    scope.name + '_cmatrix_' + str(step) + '.npz')
+                    FLAGS.checkpoint_dir, 'cmatrix_' + str(step) + '.npz')
                 with open(conf_matrix_path, "wb") as outfile:
                     np.save(outfile, c_matrix)
 

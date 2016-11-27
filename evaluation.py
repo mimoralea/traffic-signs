@@ -16,17 +16,8 @@ import classifier
 
 FLAGS = tf.app.flags.FLAGS
 
-def eval_once(saver, summary_writer, top_k_op,
-              summary_op, X_test, y_test, images_p, labels_p, keep_prob):
-    """Run Eval once.
-    Args:
-      saver: Saver.
-      summary_writer: Summary writer.
-      top_k_op: Top K op.
-      summary_op: Summary op.
-    """
+def eval_once(saver, top_k_op, X_test, y_test, images_p, labels_p, keep_prob_p):
     with tf.Session() as sess:
-        # Restores from checkpoint
         ckpt = tf.train.get_checkpoint_state(FLAGS.checkpoint_dir)
         if ckpt and ckpt.model_checkpoint_path:
             saver.restore(sess, ckpt.model_checkpoint_path)
@@ -35,27 +26,18 @@ def eval_once(saver, summary_writer, top_k_op,
             print('No checkpoint file found')
             return
 
-        predictions = sess.run(top_k_op, feed_dict={images_p:X_test, labels_p:y_test, keep_prob:1.0})
+        predictions = sess.run(top_k_op,
+                               feed_dict={images_p:X_test,
+                                          labels_p:y_test,
+                                          keep_prob_p:1.0})
         print(predictions)
         true_count = np.sum(predictions)
         precision = true_count / len(X_test)
-        summary = tf.Summary()
-        summary.ParseFromString(sess.run(summary_op, feed_dict={images_p:X_test, labels_p:y_test, keep_prob:1.0}))
-        summary.value.add(tag='Test Precision', simple_value=precision)
-        summary_writer.add_summary(summary, global_step)
 
     return precision
 
 def eval_img(saver, logits, img, label, images_p, labels_p, keep_prob):
-    """Run Eval once.
-    Args:
-      saver: Saver.
-      summary_writer: Summary writer.
-      top_k_op: Top K op.
-      summary_op: Summary op.
-    """
     with tf.Session() as sess:
-        # Restores from checkpoint
         ckpt = tf.train.get_checkpoint_state(FLAGS.checkpoint_dir)
         if ckpt and ckpt.model_checkpoint_path:
             saver.restore(sess, ckpt.model_checkpoint_path)
@@ -69,60 +51,58 @@ def eval_img(saver, logits, img, label, images_p, labels_p, keep_prob):
         sign_strings['correct'] = pd.Series(sign_strings.index.values == label, index=sign_strings.index)
         return sign_strings.sort_values(['prob', 'SignName'], ascending=[0, 1])
 
-def evaluate(X_test, y_test):
-    
-    """Eval CIFAR-10 for a number of steps."""
+def evaluate_image(img, label):
     with tf.Graph().as_default() as g:
 
-        image_shape = X_test[0].shape
-
+        image_shape = img.shape
         img_width = image_shape[0]
         img_height = image_shape[1]
         img_channels = image_shape[2]
 
-        # Get images and labels for CIFAR-10.
         images_p = tf.placeholder(tf.float32, shape=[None, img_width, img_height, img_channels])
-        images = images_p
-        images = tf.map_fn(lambda img: tf.squeeze(tf.image.rgb_to_grayscale(img)), images)
-        images = tf.expand_dims(images, -1)
         labels_p = tf.placeholder(tf.int32, shape=[None])
-        labels = labels_p
-        keep_prob = tf.placeholder(tf.float32)
+        keep_prob_p = tf.placeholder(tf.float32)
 
-        # Build a Graph that computes the logits predictions from the
-        # inference model.
-        logits = classifier.inference(images, keep_prob)
+        logits = classifier.inference(images_p, keep_prob_p)
 
-        # Calculate predictions.
-        top_k_op = tf.nn.in_top_k(logits, labels, 5)
-
-        # Restore the moving average version of the learned variables for eval.
         variable_averages = tf.train.ExponentialMovingAverage(
             classifier.MOVING_AVERAGE_DECAY)
         variables_to_restore = variable_averages.variables_to_restore()
         saver = tf.train.Saver(variables_to_restore)
 
-        # Build the summary operation based on the TF collection of Summaries.
-        summary_op = tf.merge_all_summaries()
-
-        summary_writer = tf.train.SummaryWriter(FLAGS.eval_dir, g)
-
-        #precision = eval_once(saver, summary_writer, top_k_op, summary_op,
-        #                      X_test, y_test, images, labels)
-        #print('%s: test set precision %.3f' % (datetime.now(), precision))
-
-        idx = 123
-        img = X_test[idx]
-        label = y_test[idx]
-        predictions = eval_img(saver, logits,
-                               img, label,
-                               images_p, labels_p, keep_prob)
+        predictions = eval_img(saver, logits, img, label,
+                               images_p, labels_p, keep_prob_p)
         print(predictions)
         plt.style.use('ggplot')
 
         plt.imshow(img)
         plt.show()
 
+
+def evaluate_precision(X_test, y_test, n = 5):
+    with tf.Graph().as_default() as g:
+
+        image_shape = X_test[0].shape
+        img_width = image_shape[0]
+        img_height = image_shape[1]
+        img_channels = image_shape[2]
+
+        images_p = tf.placeholder(tf.float32, shape=[None, img_width, img_height, img_channels])
+        labels_p = tf.placeholder(tf.int32, shape=[None])
+        keep_prob_p = tf.placeholder(tf.float32)
+
+        logits = classifier.inference(images_p, keep_prob_p)
+        top_k_op = tf.nn.in_top_k(logits, labels_p, n)
+
+        variable_averages = tf.train.ExponentialMovingAverage(
+            classifier.MOVING_AVERAGE_DECAY)
+        variables_to_restore = variable_averages.variables_to_restore()
+        saver = tf.train.Saver(variables_to_restore)
+
+        precision = eval_once(saver, top_k_op, X_test, y_test,
+                              images_p, labels_p, keep_prob_p)
+        print('%s: test set precision %.3f' % (datetime.now(), precision))
+        return precision
 
 def main(argv=None):  # pylint: disable=unused-argument
 
@@ -152,7 +132,12 @@ def main(argv=None):  # pylint: disable=unused-argument
     print("Image data shape =", image_shape)
     print("Number of classes =", n_classes)
 
-    evaluate(X_test, y_test)
+    idx = np.random.randint(len(X_test))
+    img = X_test[idx]
+    label = y_test[idx]
+
+    evaluate_image(img, label)
+    evaluate_precision(X_test, y_test)
 
 
 if __name__ == '__main__':
