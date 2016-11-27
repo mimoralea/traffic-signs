@@ -97,7 +97,7 @@ def inference(images, keep_prob):
     print("images", images.get_shape())
     with tf.variable_scope('conv1') as scope:
         kernel = _variable_with_weight_decay('weights',
-                                             shape=[5, 5, 1, 64],
+                                             shape=[5, 5, images.get_shape()[3], 64],
                                              stddev=5e-2,
                                              wd=0.0)
         conv = tf.nn.conv2d(images, kernel, [1, 1, 1, 1], padding='SAME')
@@ -226,10 +226,12 @@ def augment_image(img):
 def augment_images(images, keep_prob_p):
     with tf.device('/cpu:0'):
         _, img_height, img_width, _ = images.get_shape().as_list()
+        """
         images = tf.cond(tf.equal(keep_prob_p, 1.0),
                          lambda: images,
                          lambda: tf.map_fn(
                              lambda img: augment_image(img), images))
+        """
         images = tf.image.rgb_to_grayscale(images)
         images = tf.image.resize_images(images, (img_height, img_width),
                                         method=0,
@@ -316,9 +318,9 @@ def main(argv=None):  # pylint: disable=unused-argument
         labels_p = tf.placeholder(tf.int32, shape=[None])
         keep_prob_p = tf.placeholder(tf.float32)
 
-        process_op = augment_images(images_p, keep_prob_p)
+        # process_op = augment_images(images_p, keep_prob_p)
 
-        logits = inference(process_op, keep_prob_p)
+        logits = inference(images_p, keep_prob_p)
         loss = loss_func(logits, labels_p)
 
         train_op = train_func(loss, global_step)
@@ -406,7 +408,8 @@ def main(argv=None):  # pylint: disable=unused-argument
 
             if step % 10000 == 0:
                 with tf.variable_scope('conv1', reuse=True) as scope:
-                    W_conv1 = tf.get_variable('weights', shape=[5, 5, 1, 64])
+                    W_conv1 = tf.get_variable(
+                        'weights', shape=[5, 5, images_p.get_shape()[3], 64])
                     weights = W_conv1.eval(session=sess)
                     weights_path = os.path.join(FLAGS.checkpoint_dir,
                                                 scope.name + '_weights_' + str(step) + '.npz')
